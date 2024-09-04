@@ -14,9 +14,9 @@ global cell signers;
 global int approvals_mask;
 global int approvals_num;
 global int expiration_date;
-global int order_hash;  ;; 订单内容哈希值，类型修改为 int
-global int creation_timestamp;  ;; 新增：订单创建时间戳
-global slice init_sender;  ;; 新增：记录初始化请求发起者的地址
+global int order_hash;  ;; the Hash of order content
+global int creation_timestamp;  ;; the timestamp of the order creation time
+global slice init_sender;  ;; the address of the order initiator
 
 () load_data() impure inline {
     slice ds = get_data().begin_parse();
@@ -31,9 +31,11 @@ global slice init_sender;  ;; 新增：记录初始化请求发起者的地址
         approvals_mask = null();
         approvals_num = null();
         expiration_date = null();
-        order_hash = null();  ;; 初始化订单内容哈希值
-        creation_timestamp = null();  ;; 新增：初始化订单创建时间戳
-        init_sender = null();  ;; 新增：初始化请求发起者的地址
+        order_hash = null();  ;; Initialize the order content hash
+        creation_timestamp = null();  ;; Initialize the order creation time
+        init_sender = null();  ;; Initialize the address of the request initiator
+
+
     } else {
         threshold = ds~load_index();
         sent_for_execution? = ds~load_bool();
@@ -41,9 +43,9 @@ global slice init_sender;  ;; 新增：记录初始化请求发起者的地址
         approvals_mask = ds~load_uint(MASK_SIZE);
         approvals_num = ds~load_index();
         expiration_date = ds~load_timestamp();
-        order_hash = ds~load_uint(256);  ;; 加载订单内容哈希值 (256 位)
-        creation_timestamp = ds~load_timestamp();  ;; 新增：加载订单创建时间戳
-        init_sender = ds~load_msg_addr();  ;; 新增：加载初始化请求发起者的地址
+        order_hash = ds~load_uint(256);  ;; Load the order content hash (256 bits)
+        creation_timestamp = ds~load_timestamp();  ;; Load the order creation timestamp
+        init_sender = ds~load_msg_addr();  ;; Load the initializer's address
         ds.end_parse();
     }
 }
@@ -59,9 +61,9 @@ global slice init_sender;  ;; 新增：记录初始化请求发起者的地址
         .store_uint(approvals_mask, MASK_SIZE)
         .store_index(approvals_num)
         .store_timestamp(expiration_date)
-        .store_uint(order_hash, 256)  ;; 存储订单内容哈希值 (256 位)
-        .store_timestamp(creation_timestamp)  ;; 新增：存储订单创建时间戳
-        .store_slice(init_sender)  ;; 新增：存储初始化请求发起者的地址
+        .store_uint(order_hash, 256)  ;; Store the order content hash (256 bits)
+        .store_timestamp(creation_timestamp)  ;; Store the order creation timestamp
+        .store_slice(init_sender)  ;; Store the initializer's address
         .end_cell()
     );
 }
@@ -116,8 +118,8 @@ slice get_text_comment(slice in_msg_body) impure inline {
 
 () try_execute(int query_id, cell order_original) impure inline_ref {
     if (approvals_num == threshold) {
-        ;; 验证原文哈希
-        int order_cell_hash = order_original.cell_hash();  ;; 计算哈希值
+        ;; Verify the order_content hash
+        int order_cell_hash = order_original.cell_hash();  ;; compute content hash
         throw_unless(error::invalid_order, order_cell_hash == order_hash);
 
         send_message_with_only_body(
@@ -152,9 +154,9 @@ slice get_text_comment(slice in_msg_body) impure inline {
             SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
         );
 
-        ;; 当最后一个批准人需要提供原文
+        ;; The last approver should offer the order content
         if (approvals_num == threshold) {
-            cell order_original = in_msg_body~load_ref();  ;; 读取订单原文作为 cell
+            cell order_original = in_msg_body~load_ref();  ;; read the order content from msg
             try_execute(query_id, order_original);
             in_msg_body.end_parse();
         }
@@ -187,13 +189,25 @@ slice get_text_comment(slice in_msg_body) impure inline {
 
     load_data();
 
-    ;; 判断是否有数据
+    ;; check if the order already init(has data or not)
     int has_data = 1;
     if (threshold == null()) { has_data = 0; }
     int query_id = in_msg_body~load_query_id();
 
+    int op = in_msg_body~load_op();
+    if (op == 0) {
+        ;; message with text comment
+        slice text_comment = get_text_comment(in_msg_body);
+        throw_unless(error::unknown_op, equal_slices_bits(text_comment, "approve"));
+
+        (int signer_index, int found_signer?) = find_signer_by_address(sender_address);
+        throw_unless(error::unauthorized_sign, found_signer?);
+
+        approve(signer_index, sender_address, cur_lt(), in_msg_body);
+        return ();
+    }
     if (has_data) {
-        ;; 默认进入 approve 方法
+        ;; Into Approve part
         int signer_index = in_msg_body~load_index();
         in_msg_body.end_parse();
         (slice signer_address, int found?) = signers.udict_get?(INDEX_SIZE, signer_index);
@@ -209,16 +223,16 @@ slice get_text_comment(slice in_msg_body) impure inline {
         approvals_mask = 0;
         approvals_num = 0;
         expiration_date = in_msg_body~load_timestamp();
-        creation_timestamp = now();  ;; 新增：设置创建时间戳
-        init_sender = sender_address;  ;; 新增：记录初始化请求发起者的地址
+        creation_timestamp = now();  ;; Set creationTimestamp
+        init_sender = sender_address;  ;; Record the order initiator address
         throw_unless(error::expired, expiration_date >= now()); ;; in case of error TONs will bounce back to multisig
-        order_hash = in_msg_body~load_uint(256);  ;; 读取订单内容哈希值 (256 位)
+        order_hash = in_msg_body~load_uint(256);  ;; Record order hash
         int approve_on_init? = in_msg_body~load_bool();
         if (approve_on_init?) {
             int signer_index = in_msg_body~load_index();
             add_approval(signer_index);
             if (approvals_num == threshold) {
-                cell order_original = in_msg_body~load_ref();  ;; 读取订单原文作为 cell
+                cell order_original = in_msg_body~load_ref();   ;; read the order content from msg if this is the first&last approver
                 try_execute(query_id, order_original);
             }
         }
@@ -241,7 +255,7 @@ _ get_order_data() method_id {
         approvals_num,
         expiration_date,
         order_hash,
-        creation_timestamp,  ;; 新增：返回订单创建时间戳
-        init_sender  ;; 新增：返回初始化请求发起者的地址
+        creation_timestamp, 
+        init_sender
     );
 }
