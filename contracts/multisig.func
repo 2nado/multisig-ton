@@ -102,7 +102,8 @@ int calculate_dict_size(cell dict) inline {
         int signer? = in_msg_body~load_bool();
         int index = in_msg_body~load_index();
         int expiration_date = in_msg_body~load_timestamp();
-        cell order_body = in_msg_body~load_ref();
+        int order_hash = in_msg_body~load_uint(256);  ;; Record order hash
+
         in_msg_body.end_parse();
         (slice expected_address, int found?) = signers.udict_get?(INDEX_SIZE, index);
         throw_unless(error::unauthorized_new_order, found?);
@@ -116,7 +117,7 @@ int calculate_dict_size(cell dict) inline {
         .store_index(threshold)
         .store_nonempty_dict(signers)
         .store_timestamp(expiration_date)
-        .store_ref(order_body)
+        .store_uint(order_hash, 256)  ;; Store the order content hash (256 bits)
         .store_bool(signer?);
         if (signer?) {
             init_body = init_body.store_index(index);

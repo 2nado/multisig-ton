@@ -116,10 +116,10 @@ slice get_text_comment(slice in_msg_body) impure inline {
     approvals_mask |= mask;
 }
 
-() try_execute(int query_id, cell order_original) impure inline_ref {
+() try_execute(int query_id, cell order_body) impure inline_ref {
     if (approvals_num == threshold) {
         ;; Verify the order_content hash
-        int order_cell_hash = order_original.cell_hash();  ;; compute content hash
+        int order_cell_hash = order_body.cell_hash();  ;; compute content hash
         throw_unless(error::invalid_order, order_cell_hash == order_hash);
 
         send_message_with_only_body(
@@ -131,7 +131,7 @@ slice get_text_comment(slice in_msg_body) impure inline {
             .store_timestamp(expiration_date)
             .store_index(approvals_num)
             .store_hash(signers.cell_hash())
-            .store_ref(order_original),
+            .store_ref(order_body),
             NON_BOUNCEABLE,
             SEND_MODE_CARRY_ALL_BALANCE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
         );
