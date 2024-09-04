@@ -5,17 +5,17 @@
 #include "messages.func";
 #include "order_helpers.func";
 
-int validate_dictionary_sequence(cell dict) impure inline {
+int calculate_dict_size(cell dict) inline {
+    int size = 0;
     int index = -1;
-    int expected_index = 0;
-    do {
+    int found? = true;
+    while (found?) {
         (index, slice value, int found?) = dict.udict_get_next?(INDEX_SIZE, index);
         if (found?) {
-            throw_unless(error::invalid_dictionary_sequence, index == expected_index);
-            expected_index += 1;
+            size += 1;
         }
-    } until (~ found?);
-    return expected_index;
+    }
+    return size;
 }
 
 ((int, cell, int), ()) ~execute_order((int, cell, int) storage, cell order_body) impure inline {
@@ -37,7 +37,7 @@ int validate_dictionary_sequence(cell dict) impure inline {
             } elseif (action_op == actions::update_multisig_params) {
                 threshold = action~load_index();
                 signers = action~load_nonempty_dict();
-                signers_num = validate_dictionary_sequence(signers);
+                signers_num = calculate_dict_size(signers);
                 throw_unless(error::invalid_signers, signers_num >= 1);
                 throw_unless(error::invalid_threshold, threshold > 0);
                 throw_unless(error::invalid_threshold, threshold <= signers_num);
@@ -51,10 +51,9 @@ int validate_dictionary_sequence(cell dict) impure inline {
 }
 
 
-(int, int, cell, int, int) load_data() inline {
+(int, cell, int, int) load_data() inline {
     slice ds = get_data().begin_parse();
     var data = (
-        ds~load_order_seqno(), ;; next_order_seqno
         ds~load_index(), ;; threshold
         ds~load_nonempty_dict(), ;; signers
         ds~load_index(), ;; signers_num
@@ -64,10 +63,9 @@ int validate_dictionary_sequence(cell dict) impure inline {
     return data;
 }
 
-() save_data(int next_order_seqno, int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) impure inline {
+() save_data(int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) impure inline {
     set_data(
         begin_cell()
-        .store_order_seqno(next_order_seqno)
         .store_index(threshold)
         .store_nonempty_dict(signers)
         .store_index(signers_num)
@@ -96,18 +94,10 @@ int validate_dictionary_sequence(cell dict) impure inline {
 
     int query_id = in_msg_body~load_query_id();
 
-    (int next_order_seqno, int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) = load_data();
+    (int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) = load_data();
 
     if (op == op::new_order) {
-        int order_seqno = in_msg_body~load_order_seqno();
-        if (~ allow_arbitrary_order_seqno) {
-            if (order_seqno == MAX_ORDER_SEQNO) {
-                order_seqno = next_order_seqno;
-            } else {
-                throw_unless(error::invalid_new_order, (order_seqno == next_order_seqno));
-            }
-            next_order_seqno += 1;
-        }
+        int order_seqno = allow_arbitrary_order_seqno ? now() : cell_hash(begin_cell().store_timestamp(now()).end_cell());
 
         int signer? = in_msg_body~load_bool();
         int index = in_msg_body~load_index();
@@ -118,9 +108,6 @@ int validate_dictionary_sequence(cell dict) impure inline {
         throw_unless(error::unauthorized_new_order, found?);
         throw_unless(error::unauthorized_new_order, equal_slices_bits(sender_address, expected_address));
         throw_unless(error::expired, expiration_date >= now());
-
-        int minimal_value = calculate_order_processing_cost(order_body, signers, expiration_date - now());
-        throw_unless(error::not_enough_ton, msg_value >= minimal_value);
 
         cell state_init = calculate_order_state_init(my_address(), order_seqno);
         slice order_address = calculate_address_by_state_init(BASECHAIN, state_init);
@@ -172,20 +159,19 @@ int validate_dictionary_sequence(cell dict) impure inline {
         (threshold, signers, signers_num)~execute_order(order_body);
     }
 
-    save_data(next_order_seqno, threshold, signers, signers_num, allow_arbitrary_order_seqno);
+    save_data(threshold, signers, signers_num, allow_arbitrary_order_seqno);
 }
 
 (int, int, cell) get_multisig_data() method_id {
-    (int next_order_seqno, int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) = load_data();
-    throw_unless(error::inconsistent_data, signers_num == validate_dictionary_sequence(signers));
+    (int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) = load_data();
     throw_unless(error::invalid_signers, signers_num >= 1);
     throw_unless(error::invalid_threshold, threshold > 0);
     throw_unless(error::invalid_threshold, threshold <= signers_num);
-    return (allow_arbitrary_order_seqno ? -1 : next_order_seqno, threshold, signers);
+    return (allow_arbitrary_order_seqno ? -1 : cell_hash(begin_cell().store_timestamp(now()).end_cell()), threshold, signers);
 }
 
 int get_order_estimate(cell order, int expiration_date) method_id {
-    (_, _, cell signers, _, _) = load_data();
+    (_, cell signers, _, _) = load_data();
     return calculate_order_processing_cost(order, signers, expiration_date - now());
 }
 
