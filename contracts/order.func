@@ -1,0 +1,261 @@
+#include "imports/stdlib.fc";
+#include "types.func";
+#include "op-codes.func";
+#include "messages.func";
+#include "errors.func";
+
+;; DATA
+
+global slice multisig_address;
+global int order_seqno;
+global int threshold;
+global int sent_for_execution?;
+global cell signers;
+global int approvals_mask;
+global int approvals_num;
+global int expiration_date;
+global int order_hash;  ;; the Hash of order content
+global int creation_timestamp;  ;; the timestamp of the order creation time
+global slice init_sender;  ;; the address of the order initiator
+
+() load_data() impure inline {
+    slice ds = get_data().begin_parse();
+    multisig_address = ds~load_msg_addr();
+    order_seqno = ds~load_order_seqno();
+
+    if (ds.slice_bits() == 0) {
+        ;; not initialized yet
+        threshold = null();
+        sent_for_execution? = null();
+        signers = null();
+        approvals_mask = null();
+        approvals_num = null();
+        expiration_date = null();
+        order_hash = null();  ;; Initialize the order content hash
+        creation_timestamp = null();  ;; Initialize the order creation time
+        init_sender = null();  ;; Initialize the address of the request initiator
+
+
+    } else {
+        threshold = ds~load_index();
+        sent_for_execution? = ds~load_bool();
+        signers = ds~load_nonempty_dict();
+        approvals_mask = ds~load_uint(MASK_SIZE);
+        approvals_num = ds~load_index();
+        expiration_date = ds~load_timestamp();
+        order_hash = ds~load_uint(256);  ;; Load the order content hash (256 bits)
+        creation_timestamp = ds~load_timestamp();  ;; Load the order creation timestamp
+        init_sender = ds~load_msg_addr();  ;; Load the initializer's address
+        ds.end_parse();
+    }
+}
+
+() save_data() impure inline {
+    set_data(
+        begin_cell()
+        .store_slice(multisig_address)
+        .store_order_seqno(order_seqno)
+        .store_index(threshold)
+        .store_bool(sent_for_execution?)
+        .store_nonempty_dict(signers)
+        .store_uint(approvals_mask, MASK_SIZE)
+        .store_index(approvals_num)
+        .store_timestamp(expiration_date)
+        .store_uint(order_hash, 256)  ;; Store the order content hash (256 bits)
+        .store_timestamp(creation_timestamp)  ;; Store the order creation timestamp
+        .store_slice(init_sender)  ;; Store the initializer's address
+        .end_cell()
+    );
+}
+
+;; UTILS
+
+slice get_text_comment(slice in_msg_body) impure inline {
+    if (in_msg_body.slice_refs() == 0) {
+        return in_msg_body;
+    }
+
+    ;;combine comment into one slice
+    builder combined_string = begin_cell();
+    int need_exit = false;
+    do {
+        ;; store all bits from current cell
+        ;; it's ok to overflow here, it means that comment is incorrect
+        combined_string = combined_string.store_slice(in_msg_body.preload_bits(in_msg_body.slice_bits()));
+        ;;and go to the next
+
+        if (in_msg_body.slice_refs()) {
+            in_msg_body = in_msg_body.preload_ref().begin_parse();
+        } else {
+            need_exit = true;
+        }
+
+    } until (need_exit);
+    return combined_string.end_cell().begin_parse();
+}
+
+(int, int) find_signer_by_address(slice signer_address) impure inline {
+    int found_signer? = false;
+    int signer_index = -1;
+    do {
+        (signer_index, slice value, int next_found?) = signers.udict_get_next?(INDEX_SIZE, signer_index);
+        if (next_found?) {
+            if (equal_slices_bits(signer_address, value)) {
+                found_signer? = true;
+                next_found? = false; ;; fast way to exit loop
+            }
+        }
+    } until (~ next_found?);
+    return (signer_index, found_signer?);
+}
+
+() add_approval(int signer_index) impure inline {
+    int mask = 1 << signer_index;
+    throw_if(error::already_approved, approvals_mask & mask);
+    approvals_num += 1;
+    approvals_mask |= mask;
+}
+
+() try_execute(int query_id, cell order_body) impure inline_ref {
+    if (approvals_num == threshold) {
+        ;; Verify the order_content hash
+        int order_cell_hash = order_body.cell_hash();  ;; compute content hash
+        throw_unless(error::invalid_order, order_cell_hash == order_hash);
+
+        send_message_with_only_body(
+            multisig_address,
+            0,
+            begin_cell()
+            .store_op_and_query_id(op::execute, query_id)
+            .store_order_seqno(order_seqno)
+            .store_timestamp(expiration_date)
+            .store_index(approvals_num)
+            .store_hash(signers.cell_hash())
+            .store_ref(order_body),
+            NON_BOUNCEABLE,
+            SEND_MODE_CARRY_ALL_BALANCE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+        );
+        sent_for_execution? = true;
+    }
+}
+
+() approve(int signer_index, slice response_address, int query_id, slice in_msg_body) impure inline_ref {
+    try {
+
+        throw_if(error::already_executed, sent_for_execution?);
+
+        add_approval(signer_index);
+
+        send_message_with_only_body(
+            response_address,
+            0,
+            begin_cell().store_op_and_query_id(op::approve_accepted, query_id),
+            NON_BOUNCEABLE,
+            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+        );
+
+        ;; The last approver should offer the order content
+        if (approvals_num == threshold) {
+            cell order_original = in_msg_body~load_ref();  ;; read the order content from msg
+            try_execute(query_id, order_original);
+            in_msg_body.end_parse();
+        }
+
+
+        save_data();
+
+    } catch (_, exit_code) {
+        send_message_with_only_body(
+            response_address,
+            0,
+            begin_cell()
+            .store_op_and_query_id(op::approve_rejected, query_id)
+            .store_uint(exit_code, 32),
+            NON_BOUNCEABLE,
+            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+        );
+    }
+}
+
+;; RECEIVE
+
+() recv_internal(int balance, int msg_value, cell in_msg_full, slice in_msg_body) {
+    slice in_msg_full_slice = in_msg_full.begin_parse();
+    int msg_flags = in_msg_full_slice~load_msg_flags();
+    if (msg_flags & 1) { ;; is bounced
+        return ();
+    }
+    slice sender_address = in_msg_full_slice~load_msg_addr();
+
+    load_data();
+
+    ;; check if the order already init(has data or not)
+    int has_data = 1;
+    if (threshold == null()) { has_data = 0; }
+    int query_id = in_msg_body~load_query_id();
+
+    int op = in_msg_body~load_op();
+    if (op == 0) {
+        ;; message with text comment
+        slice text_comment = get_text_comment(in_msg_body);
+        throw_unless(error::unknown_op, equal_slices_bits(text_comment, "approve"));
+
+        (int signer_index, int found_signer?) = find_signer_by_address(sender_address);
+        throw_unless(error::unauthorized_sign, found_signer?);
+
+        approve(signer_index, sender_address, cur_lt(), in_msg_body);
+        return ();
+    }
+    if (has_data) {
+        ;; Into Approve part
+        int signer_index = in_msg_body~load_index();
+        in_msg_body.end_parse();
+        (slice signer_address, int found?) = signers.udict_get?(INDEX_SIZE, signer_index);
+        throw_unless(error::unauthorized_sign, found?);
+        throw_unless(error::unauthorized_sign, equal_slices_bits(sender_address, signer_address));
+        approve(signer_index, sender_address, query_id, in_msg_body);
+    } else {
+        throw_unless(error::unauthorized_init, equal_slices_bits(sender_address, multisig_address));
+        ;; Let's init
+        threshold = in_msg_body~load_index();
+        sent_for_execution? = false;
+        signers = in_msg_body~load_nonempty_dict();
+        approvals_mask = 0;
+        approvals_num = 0;
+        expiration_date = in_msg_body~load_timestamp();
+        creation_timestamp = now();  ;; Set creationTimestamp
+        init_sender = sender_address;  ;; Record the order initiator address
+        throw_unless(error::expired, expiration_date >= now()); ;; in case of error TONs will bounce back to multisig
+        order_hash = in_msg_body~load_uint(256);  ;; Record order hash
+        int approve_on_init? = in_msg_body~load_bool();
+        if (approve_on_init?) {
+            int signer_index = in_msg_body~load_index();
+            add_approval(signer_index);
+            if (approvals_num == threshold) {
+                cell order_original = in_msg_body~load_ref();   ;; read the order content from msg if this is the first&last approver
+                try_execute(query_id, order_original);
+            }
+        }
+        in_msg_body.end_parse();
+        save_data();
+    }
+}
+
+;; GET-METHODS
+
+_ get_order_data() method_id {
+    load_data();
+    return (
+        multisig_address,
+        order_seqno,
+        threshold,
+        sent_for_execution?,
+        signers,
+        approvals_mask,
+        approvals_num,
+        expiration_date,
+        order_hash,
+        creation_timestamp, 
+        init_sender
+    );
+}
