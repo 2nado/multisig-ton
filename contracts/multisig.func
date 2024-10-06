@@ -72,18 +72,18 @@ int calculate_dict_size(cell dict) inline {
     );
 }
 
-;; ;; load params from msg when op is new_order
-;; (slice, (int, int, int, cell)) ~parse_approve_params(slice msg) inline {
-;;     int index = msg~load_index();
-;;     int expiration_date = msg~load_timestamp();
-;;     int salt = msg~load_uint(256);
-;;     cell order = msg~load_ref();
+;; load params from msg when op is new_order
+(slice, (int, int, int, cell)) ~parse_approve_params(slice msg) inline {
+    int index = msg~load_index();
+    int expiration_date = msg~load_timestamp();
+    int salt = msg~load_uint(256);
+    cell order = msg~load_ref();
 
-;;     msg.end_parse();
-;;     return (
-;;         msg, (index, expiration_date, salt, order)
-;;     );
-;; }
+    msg.end_parse();
+    return (
+        msg, (index, expiration_date, salt, order)
+    );
+}
 
 () recv_internal(int balance, int msg_value, cell in_msg_full, slice in_msg_body) {
     slice in_msg_full_slice = in_msg_full.begin_parse();
@@ -111,33 +111,33 @@ int calculate_dict_size(cell dict) inline {
     (int threshold, cell signers, int signers_num) = load_data();
 
     if (op == op::approve) {
-        ;; ;; approve(signer_index, expiration_date, salt, order)
-        ;; (int signer_index, int expiration_date, int salt, cell order) = in_msg_body~parse_approve_params();
+        ;; approve(signer_index, expiration_date, salt, order)
+        (int signer_index, int expiration_date, int salt, cell order) = in_msg_body~parse_approve_params();
 
-        ;; (slice expected_address, int found?) = signers.udict_get?(INDEX_SIZE, signer_index);
-        ;; throw_unless(error::unauthorized_new_order, found?);
-        ;; throw_unless(error::unauthorized_new_order, equal_slices_bits(sender_address, expected_address));
-        ;; throw_unless(error::expired, expiration_date >= now());
+        (slice expected_address, int found?) = signers.udict_get?(INDEX_SIZE, signer_index);
+        throw_unless(error::unauthorized_new_order, found?);
+        throw_unless(error::unauthorized_new_order, equal_slices_bits(sender_address, expected_address));
+        throw_unless(error::expired, expiration_date >= now());
 
-        ;; cell state_init = calculate_order_state_init(my_address(), salt);
-        ;; slice order_address = calculate_address_by_state_init(BASECHAIN, state_init);
-        ;; ;; order.approve(threshold, signers, expiration_date, signer_index, order)
-        ;; builder init_body = begin_cell()
-        ;; .store_op_and_query_id(op::init, query_id)
-        ;; .store_index(threshold)
-        ;; .store_nonempty_dict(signers)
-        ;; .store_timestamp(expiration_date)
-        ;; .store_index(signer_index)
-        ;; .store_ref(order);
+        cell state_init = calculate_order_state_init(my_address(), salt);
+        slice order_address = calculate_address_by_state_init(BASECHAIN, state_init);
+        ;; order.approve(threshold, signers, expiration_date, signer_index, order)
+        builder init_body = begin_cell()
+        .store_op_and_query_id(op::init, query_id)
+        .store_index(threshold)
+        .store_nonempty_dict(signers)
+        .store_timestamp(expiration_date)
+        .store_index(signer_index)
+        .store_ref(order);
 
-        ;; send_message_with_state_init_and_body(
-        ;;     order_address,
-        ;;     0,
-        ;;     state_init,
-        ;;     init_body,
-        ;;     BOUNCEABLE,
-        ;;     SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
-        ;; );
+        send_message_with_state_init_and_body(
+            order_address,
+            0,
+            state_init,
+            init_body,
+            BOUNCEABLE,
+            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+        );
 
     } elseif (op == op::execute) {
         ;; check that sender is order smart-contract and check that it has recent
