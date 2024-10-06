@@ -51,33 +51,46 @@ int calculate_dict_size(cell dict) inline {
 }
 
 
-(int, cell, int, int) load_data() inline {
+(int, cell, int) load_data() inline {
     slice ds = get_data().begin_parse();
     var data = (
         ds~load_index(), ;; threshold
         ds~load_nonempty_dict(), ;; signers
-        ds~load_index(), ;; signers_num
-        ds~load_bool()  ;; allow_arbitrary_order_seqno
+        ds~load_index() ;; signers_num
     );
     ds.end_parse();
     return data;
 }
 
-() save_data(int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) impure inline {
+() save_data(int threshold, cell signers, int signers_num) impure inline {
     set_data(
         begin_cell()
         .store_index(threshold)
         .store_nonempty_dict(signers)
         .store_index(signers_num)
-        .store_bool(allow_arbitrary_order_seqno)
         .end_cell()
     );
 }
 
+;; ;; load params from msg when op is new_order
+;; (slice, (int, int, int, cell)) ~parse_approve_params(slice msg) inline {
+;;     int index = msg~load_index();
+;;     int expiration_date = msg~load_timestamp();
+;;     int salt = msg~load_uint(256);
+;;     cell order = msg~load_ref();
+
+;;     msg.end_parse();
+;;     return (
+;;         msg, (index, expiration_date, salt, order)
+;;     );
+;; }
+
 () recv_internal(int balance, int msg_value, cell in_msg_full, slice in_msg_body) {
     slice in_msg_full_slice = in_msg_full.begin_parse();
     int msg_flags = in_msg_full_slice~load_msg_flags();
-    if (msg_flags & 1) { ;; is bounced
+    if (msg_flags & 1) {
+        ;; if the msg is bounced
+        ;; do not process it
         return ();
     }
     slice sender_address = in_msg_full_slice~load_msg_addr();
@@ -94,55 +107,50 @@ int calculate_dict_size(cell dict) inline {
 
     int query_id = in_msg_body~load_query_id();
 
-    (int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) = load_data();
+    ;; load data from contract storage
+    (int threshold, cell signers, int signers_num) = load_data();
 
-    if (op == op::new_order) {
-        int order_seqno = allow_arbitrary_order_seqno ? now() : cell_hash(begin_cell().store_timestamp(now()).end_cell());
+    if (op == op::approve) {
+        ;; ;; approve(signer_index, expiration_date, salt, order)
+        ;; (int signer_index, int expiration_date, int salt, cell order) = in_msg_body~parse_approve_params();
 
-        int signer? = in_msg_body~load_bool();
-        int index = in_msg_body~load_index();
-        int expiration_date = in_msg_body~load_timestamp();
-        int order_hash = in_msg_body~load_uint(256);  ;; Record order hash
+        ;; (slice expected_address, int found?) = signers.udict_get?(INDEX_SIZE, signer_index);
+        ;; throw_unless(error::unauthorized_new_order, found?);
+        ;; throw_unless(error::unauthorized_new_order, equal_slices_bits(sender_address, expected_address));
+        ;; throw_unless(error::expired, expiration_date >= now());
 
-        in_msg_body.end_parse();
-        (slice expected_address, int found?) = signers.udict_get?(INDEX_SIZE, index);
-        throw_unless(error::unauthorized_new_order, found?);
-        throw_unless(error::unauthorized_new_order, equal_slices_bits(sender_address, expected_address));
-        throw_unless(error::expired, expiration_date >= now());
+        ;; cell state_init = calculate_order_state_init(my_address(), salt);
+        ;; slice order_address = calculate_address_by_state_init(BASECHAIN, state_init);
+        ;; ;; order.approve(threshold, signers, expiration_date, signer_index, order)
+        ;; builder init_body = begin_cell()
+        ;; .store_op_and_query_id(op::init, query_id)
+        ;; .store_index(threshold)
+        ;; .store_nonempty_dict(signers)
+        ;; .store_timestamp(expiration_date)
+        ;; .store_index(signer_index)
+        ;; .store_ref(order);
 
-        cell state_init = calculate_order_state_init(my_address(), order_seqno);
-        slice order_address = calculate_address_by_state_init(BASECHAIN, state_init);
-        builder init_body = begin_cell()
-        .store_op_and_query_id(op::init, query_id)
-        .store_index(threshold)
-        .store_nonempty_dict(signers)
-        .store_timestamp(expiration_date)
-        .store_uint(order_hash, 256)  ;; Store the order content hash (256 bits)
-        .store_bool(signer?);
-        if (signer?) {
-            init_body = init_body.store_index(index);
-        }
-        send_message_with_state_init_and_body(
-            order_address,
-            0,
-            state_init,
-            init_body,
-            BOUNCEABLE,
-            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
-        );
+        ;; send_message_with_state_init_and_body(
+        ;;     order_address,
+        ;;     0,
+        ;;     state_init,
+        ;;     init_body,
+        ;;     BOUNCEABLE,
+        ;;     SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE | SEND_MODE_BOUNCE_ON_ACTION_FAIL
+        ;; );
 
     } elseif (op == op::execute) {
         ;; check that sender is order smart-contract and check that it has recent
         ;; signers dict
 
-        int order_seqno = in_msg_body~load_order_seqno();
+        int salt = in_msg_body~load_order_salt();
         int expiration_date = in_msg_body~load_timestamp();
         int approvals_num = in_msg_body~load_index();
         int signers_hash = in_msg_body~load_hash();
         cell order_body = in_msg_body~load_ref();
         in_msg_body.end_parse();
 
-        cell state_init = calculate_order_state_init(my_address(), order_seqno);
+        cell state_init = calculate_order_state_init(my_address(), salt);
         slice order_address = calculate_address_by_state_init(BASECHAIN, state_init);
 
         throw_unless(error::unauthorized_execute, equal_slices_bits(sender_address, order_address));
@@ -160,23 +168,24 @@ int calculate_dict_size(cell dict) inline {
         (threshold, signers, signers_num)~execute_order(order_body);
     }
 
-    save_data(threshold, signers, signers_num, allow_arbitrary_order_seqno);
+    save_data(threshold, signers, signers_num);
 }
 
-(int, int, cell) get_multisig_data() method_id {
-    (int threshold, cell signers, int signers_num, int allow_arbitrary_order_seqno) = load_data();
+(int, cell, int) get_multisig_data() method_id {
+    (int threshold, cell signers, int signers_num) = load_data();
     throw_unless(error::invalid_signers, signers_num >= 1);
     throw_unless(error::invalid_threshold, threshold > 0);
     throw_unless(error::invalid_threshold, threshold <= signers_num);
-    return (allow_arbitrary_order_seqno ? -1 : cell_hash(begin_cell().store_timestamp(now()).end_cell()), threshold, signers);
+    return (threshold, signers, signers_num);
 }
 
 int get_order_estimate(cell order, int expiration_date) method_id {
-    (_, cell signers, _, _) = load_data();
+    (_, cell signers, _) = load_data();
     return calculate_order_processing_cost(order, signers, expiration_date - now());
 }
 
-slice get_order_address(int order_seqno) method_id {
-    cell state_init = calculate_order_state_init(my_address(), order_seqno);
+slice get_order_address(int salt) method_id {
+    cell state_init = calculate_order_state_init(my_address(), salt);
     return calculate_address_by_state_init(BASECHAIN, state_init);
 }
+

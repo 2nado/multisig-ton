@@ -51,12 +51,9 @@ function cellToArray(addrDict: Cell | null) : Array<Address>  {
 
 export function multisigConfigToCell(config: MultisigConfig): Cell {
     return beginCell()
-                .storeUint(0, Params.bitsize.orderSeqno)
                 .storeUint(config.threshold, Params.bitsize.signerIndex)
                 .storeRef(beginCell().storeDictDirect(arrayToCell(config.signers)))
                 .storeUint(config.signers.length, Params.bitsize.signerIndex)
-                .storeDict(arrayToCell(config.proposers))
-                .storeBit(config.allowArbitrarySeqno)
            .endCell();
 }
 
@@ -260,10 +257,8 @@ export class Multisig implements Contract {
 
     async getMultisigData(provider: ContractProvider) {
         const { stack } = await provider.get("get_multisig_data", []);
-        const nextOrderSeqno = stack.readBigNumber();
         const threshold = stack.readBigNumber();
         const signers = cellToArray(stack.readCellOpt());
-        const proposers = cellToArray(stack.readCellOpt());
-        return { nextOrderSeqno, threshold, signers, proposers};
+        return {threshold, signers};
     }
 }
